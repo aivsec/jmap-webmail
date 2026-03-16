@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 (2026-03-16)
+
+### Features
+
+- **OAuth-only mode**: New `OAUTH_ONLY` env var hides the username/password form and only shows SSO login (#32)
+- **OAuth retry**: Added retry button when OAuth discovery fails, preventing dead-end login pages
+
 ## 1.1.4 (2026-03-16)
 
 ### Fixes

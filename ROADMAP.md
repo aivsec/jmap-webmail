@@ -21,6 +21,7 @@ This document tracks the development status and planned features for JMAP Webmai
 - [x] OAuth2/OIDC with PKCE (opt-in SSO, session persistence, RP-initiated logout)
 - [x] External IdP support via explicit issuer URL (Keycloak, Authentik, etc.)
 - [x] "Remember me" session persistence for Basic Auth (AES-256-GCM encrypted httpOnly cookie)
+- [x] OAuth-only mode (`OAUTH_ONLY` env var to hide basic auth form)
 
 ### JMAP Server Connection
 - [x] Session establishment and keep-alive
