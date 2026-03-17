@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.2 (2026-03-17)
+
+### Fixes
+
+- **Navigation**: Bottom navigation bar now consistent across all pages (Mail, Calendar, Contacts) on tablet/landscape breakpoint (#30)
+- **Navigation**: Fixed nav bar layering (content no longer bleeds through) and removed redundant active indicator bar
+
 ## 1.3.1 (2026-03-16)
 
 ### Fixes
