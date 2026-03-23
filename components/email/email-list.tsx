@@ -4,7 +4,7 @@ import { Email, ThreadGroup } from "@/lib/jmap/types";
 import { ThreadListItem } from "./thread-list-item";
 import { EmailContextMenu } from "./email-context-menu";
 import { cn } from "@/lib/utils";
-import { Inbox, CheckSquare, Square, Trash2, Mail, MailOpen, Loader2 } from "lucide-react";
+import { Inbox, Trash2, Mail, MailOpen, Loader2 } from "lucide-react";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -18,6 +18,8 @@ import { useTranslations } from "next-intl";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { SearchChips } from "@/components/search/search-chips";
 import { isFilterEmpty, DEFAULT_SEARCH_FILTERS } from "@/lib/jmap/search-utils";
+import { SelectionDropdown } from "./selection-dropdown";
+import { MoveToPopover } from "./move-to-popover";
 
 interface EmailListProps {
   emails: Email[];
@@ -62,8 +64,12 @@ export function EmailList({
   const { client } = useAuthStore();
   const {
     selectedEmailIds,
+    toggleEmailSelection,
     selectAllEmails,
     clearSelection,
+    selectRange,
+    lastSelectedIndex,
+    selectByFilter,
     batchMarkAsRead,
     batchDelete,
     batchMoveToMailbox,
@@ -85,6 +91,16 @@ export function EmailList({
     clearSearchFilters,
     advancedSearch,
   } = useEmailStore();
+
+  const [showRefreshOverlay, setShowRefreshOverlay] = useState(false);
+  useEffect(() => {
+    if (!isLoading || emails.length === 0) {
+      setShowRefreshOverlay(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowRefreshOverlay(true), 300);
+    return () => clearTimeout(timer);
+  }, [isLoading, emails.length]);
 
   const threadGroups = useMemo(() => {
     const groups = groupEmailsByThread(emails);
@@ -133,7 +149,7 @@ export function EmailList({
   );
 
   const hasSelection = selectedEmailIds.size > 0;
-  const allSelected = emails.length > 0 && emails.every(e => selectedEmailIds.has(e.id));
+  const allSelected = threadGroups.length > 0 && threadGroups.every(g => selectedEmailIds.has(g.latestEmail.id));
 
   const handleBatchMarkAsRead = async (read: boolean) => {
     if (!client || isProcessing) return;
@@ -164,6 +180,25 @@ export function EmailList({
     }
   };
 
+  const handleBatchMove = async (mailboxId: string) => {
+    if (!client || isProcessing) return;
+    setIsProcessing(true);
+    try {
+      await batchMoveToMailbox(client, mailboxId);
+      const { toast } = await import('sonner');
+      const targetMailbox = mailboxes.find(m => m.id === mailboxId);
+      toast.success(t('batch_actions.move_success', {
+        count: selectedEmailIds.size,
+        folder: targetMailbox?.name || mailboxId,
+      }));
+    } catch {
+      const { toast } = await import('sonner');
+      toast.error(t('batch_actions.move_error'));
+    } finally {
+      setTimeout(() => setIsProcessing(false), 500);
+    }
+  };
+
   const handleLoadMore = useCallback(() => {
     if (client && hasMoreEmails && !isLoadingMore && !isLoading) {
       loadMoreEmails(client);
@@ -180,6 +215,15 @@ export function EmailList({
       toggleThreadExpansion(threadId);
     }
   }, [client, expandedThreadIds, toggleThreadExpansion, fetchThreadEmails]);
+
+  const handleCheckboxClick = useCallback((e: React.MouseEvent, emailId: string, groupIndex: number) => {
+    e.stopPropagation();
+    if (e.shiftKey && lastSelectedIndex !== null) {
+      selectRange(lastSelectedIndex, groupIndex, threadGroups);
+    } else {
+      toggleEmailSelection(emailId, groupIndex);
+    }
+  }, [lastSelectedIndex, selectRange, toggleEmailSelection, threadGroups]);
 
   // Range-based load more: trigger when last visible item is near the end
   const virtualItems = virtualizer.getVirtualItems();
@@ -202,14 +246,35 @@ export function EmailList({
     if (index >= 0) {
       virtualizer.scrollToIndex(index, { align: 'auto' });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scroll only on selection change, not on list re-renders
   }, [selectedEmailId]);
 
   // Re-measure all items when density or preview settings change
   useEffect(() => {
     virtualizer.measure();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- virtualizer ref is stable, only re-measure on setting changes
   }, [listDensity, showPreview]);
+
+  useEffect(() => {
+    const container = parentRef.current;
+    if (!container) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        const activeEl = document.activeElement;
+        const isInInput = activeEl instanceof HTMLInputElement ||
+          activeEl instanceof HTMLTextAreaElement ||
+          (activeEl instanceof HTMLElement && activeEl.isContentEditable);
+        if (isInInput) return;
+
+        e.preventDefault();
+        selectAllEmails(threadGroups);
+      }
+    };
+
+    container.addEventListener('keydown', handleKeyDown);
+    return () => container.removeEventListener('keydown', handleKeyDown);
+  }, [selectAllEmails, threadGroups]);
 
   return (
     <div className={cn("flex flex-col h-full", className)}>
@@ -222,8 +287,8 @@ export function EmailList({
       >
         <div className="px-4 py-2 border-b bg-accent/30 border-border flex items-center justify-between">
           <div className="flex items-center gap-2 animate-in fade-in slide-in-from-left-3 duration-300">
-            <span className="text-sm font-medium text-foreground">
-              {selectedEmailIds.size} {selectedEmailIds.size === 1 ? 'email' : 'emails'} selected
+            <span className="text-sm font-medium text-foreground" aria-live="polite">
+              {t('batch_actions.selected_count', { count: selectedEmailIds.size })}
             </span>
           </div>
           <div className="flex items-center gap-1 animate-in fade-in slide-in-from-right-3 duration-300">
@@ -255,6 +320,12 @@ export function EmailList({
                 <Mail className="w-4 h-4" />
               )}
             </Button>
+            <MoveToPopover
+              mailboxes={mailboxes}
+              currentMailboxId={selectedMailbox}
+              onMove={handleBatchMove}
+              disabled={isProcessing}
+            />
             <Button
               variant="ghost"
               size="sm"
@@ -278,7 +349,7 @@ export function EmailList({
               disabled={isProcessing}
               className="text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
             >
-              Cancel
+              {t('batch_actions.clear_selection')}
             </Button>
           </div>
         </div>
@@ -303,22 +374,12 @@ export function EmailList({
       {/* List Header */}
       <div className="px-4 py-3 border-b bg-muted/50 border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => allSelected ? clearSelection() : selectAllEmails()}
-            className={cn(
-              "p-1 rounded transition-all duration-200",
-              "hover:bg-muted hover:scale-110",
-              "active:scale-95",
-              allSelected && "text-primary"
-            )}
-            title={allSelected ? "Deselect all" : "Select all"}
-          >
-            {allSelected ? (
-              <CheckSquare className="w-4 h-4 animate-in zoom-in-50 duration-200" />
-            ) : (
-              <Square className="w-4 h-4" />
-            )}
-          </button>
+          <SelectionDropdown
+            hasSelection={hasSelection}
+            allSelected={allSelected}
+            onSelectByFilter={(filter, groups) => selectByFilter(filter, groups)}
+            threadGroups={threadGroups}
+          />
           <h2 className="text-sm font-medium text-foreground">
             {isLoading ? t('loading') : threadGroups.length > 0
               ? (totalEmails !== undefined && totalEmails > threadGroups.length
@@ -332,9 +393,9 @@ export function EmailList({
       </div>
 
       {/* Email List */}
-      <div ref={parentRef} className="flex-1 overflow-y-auto bg-background relative">
+      <div ref={parentRef} className="flex-1 overflow-y-auto bg-background relative" tabIndex={0}>
         {/* Loading overlay */}
-        {isLoading && emails.length > 0 && (
+        {showRefreshOverlay && (
           <div className="absolute inset-0 bg-background/50 z-10 flex items-center justify-center animate-in fade-in duration-150">
             <div className="flex items-center gap-2 text-sm text-muted-foreground bg-background/90 px-4 py-2 rounded-full shadow-sm border border-border">
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -354,7 +415,7 @@ export function EmailList({
         ) : (
           <>
             <div
-              className={cn("transition-opacity duration-200", isLoading && "opacity-50")}
+              className="w-full"
               style={{
                 height: `${virtualizer.getTotalSize()}px`,
                 width: '100%',
@@ -386,6 +447,8 @@ export function EmailList({
                       onEmailSelect={(email) => onEmailSelect?.(email)}
                       onContextMenu={openContextMenu}
                       onOpenConversation={onOpenConversation}
+                      isChecked={selectedEmailIds.has(thread.latestEmail.id)}
+                      onCheckboxClick={(e) => handleCheckboxClick(e, thread.latestEmail.id, virtualItem.index)}
                     />
                   </div>
                 );

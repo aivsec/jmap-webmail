@@ -44,7 +44,7 @@ This document tracks the development status and planned features for JMAP Webmai
 - [x] Full-text search
 - [x] Advanced search with JMAP filter panel, search chips, and cross-mailbox queries
 - [x] Attachment upload and download
-- [x] Batch operations (multi-select)
+- [x] Batch operations (multi-select with shift-click, batch move/delete toolbar)
 - [x] Quick reply form
 - [x] Email threading (Gmail-style inline expansion)
 
@@ -65,6 +65,7 @@ This document tracks the development status and planned features for JMAP Webmai
 - [x] Drag-and-drop email organization
 - [x] Right-click context menus
 - [x] Hierarchical mailbox display
+- [x] Folder management (create, rename, move, delete via context menu, drag-and-drop reparenting)
 - [x] Email list with avatars and visual hierarchy
 - [x] Expandable email headers
 - [x] External content warning banner
@@ -246,6 +247,7 @@ This document tracks the development status and planned features for JMAP Webmai
 - [x] Unit tests for OAuth PKCE and discovery (14 tests)
 - [x] Unit tests for iframe rendering detection (12 tests)
 - [x] Unit tests for API retry with backoff (9 tests)
+- [x] 704 tests total across 28 test suites
 - [x] XSS attack vector testing
 - [x] Playwright E2E framework setup
 

@@ -32,6 +32,9 @@ Stalwart is a mail server written in Rust with native JMAP support, not IMAP/SMT
 - Responsive (desktop sidebar + mobile bottom tab bar + mobile action bar)
 - Keyboard shortcuts
 - Drag-and-drop email organization
+- Multi-select emails (checkboxes, shift-click) with batch move/delete toolbar
+- Folder management (create, rename, move, delete) from sidebar context menu
+- Drag-and-drop folder reparenting
 - Right-click context menus (long-press on touch devices)
 - Extra-compact, compact, regular, and comfortable density options
 - Resizable sidebar (drag, touch, keyboard)

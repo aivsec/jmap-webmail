@@ -49,11 +49,22 @@ interface JMAPEmailHeader {
 
 type JMAPMethodCall = [string, Record<string, unknown>, string];
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- JMAP responses have schema-variable nested payloads
 type JMAPResponseResult = Record<string, any>;
 
 interface JMAPResponse {
   methodResponses: Array<[string, JMAPResponseResult, string]>;
+}
+
+export class JMAPSetError extends Error {
+  type: string;
+  description?: string;
+  constructor(type: string, description?: string) {
+    super(description || `Mailbox/set error: ${type}`);
+    this.name = 'JMAPSetError';
+    this.type = type;
+    this.description = description;
+  }
 }
 
 const DEFAULT_MAILBOX_RIGHTS = {
@@ -256,12 +267,11 @@ export class JMAPClient {
     this.pingInterval = setInterval(async () => {
       try {
         await this.ping();
-      } catch (error) {
-        console.error('Keep-alive ping failed:', error);
+      } catch {
         try {
           await this.reconnect();
-        } catch (reconnectError) {
-          console.error('Reconnection failed:', reconnectError);
+        } catch {
+          return;
         }
       }
     }, 30_000);
@@ -347,7 +357,6 @@ export class JMAPClient {
     const responseText = await response.text();
 
     if (!response.ok) {
-      console.error('Request failed:', response.status, responseText);
       throw new Error(`Request failed: ${response.status} - ${responseText.substring(0, 200)}`);
     }
 
@@ -355,7 +364,6 @@ export class JMAPClient {
     try {
       data = JSON.parse(responseText);
     } catch {
-      console.error('Failed to parse response:', responseText);
       throw new Error('Invalid JSON response from server');
     }
 
@@ -417,8 +425,7 @@ export class JMAPClient {
       }
 
       throw new Error('Unexpected response format');
-    } catch (error) {
-      console.error('Failed to get mailboxes:', error);
+    } catch {
       return [{
         id: 'INBOX',
         originalId: undefined,
@@ -481,14 +488,13 @@ export class JMAPClient {
 
             allMailboxes.push(...mailboxes);
           }
-        } catch (error) {
-          console.error(`Failed to fetch mailboxes for account ${accountId}:`, error);
+        } catch {
+          continue;
         }
       }
 
       return allMailboxes;
-    } catch (error) {
-      console.error("Failed to fetch all mailboxes:", error);
+    } catch {
       return this.getMailboxes();
     }
   }
@@ -532,8 +538,7 @@ export class JMAPClient {
       }
 
       return { emails: [], hasMore: false, total: 0 };
-    } catch (error) {
-      console.error('Failed to get emails:', error);
+    } catch {
       return { emails: [], hasMore: false, total: 0 };
     }
   }
@@ -576,8 +581,7 @@ export class JMAPClient {
       }
 
       return email;
-    } catch (error) {
-      console.error('Failed to get email:', error);
+    } catch {
       return null;
     }
   }
@@ -769,6 +773,59 @@ export class JMAPClient {
     ]);
   }
 
+  async createMailbox(name: string, parentId?: string): Promise<string> {
+    const create: Record<string, unknown> = { name };
+    if (parentId) create.parentId = parentId;
+
+    const response = await this.request([
+      ["Mailbox/set", {
+        accountId: this.accountId,
+        create: { "new-mailbox": create },
+      }, "0"],
+    ]);
+
+    const result = response.methodResponses?.[0]?.[1];
+    if (result?.notCreated?.["new-mailbox"]) {
+      const err = result.notCreated["new-mailbox"];
+      throw new JMAPSetError(err.type || "unknown", err.description);
+    }
+
+    const realId = result?.created?.["new-mailbox"]?.id;
+    if (!realId) throw new JMAPSetError("unknown", "Server did not return created mailbox ID");
+    return realId;
+  }
+
+  async updateMailbox(id: string, changes: { name?: string; parentId?: string | null }): Promise<void> {
+    const response = await this.request([
+      ["Mailbox/set", {
+        accountId: this.accountId,
+        update: { [id]: changes },
+      }, "0"],
+    ]);
+
+    const result = response.methodResponses?.[0]?.[1];
+    if (result?.notUpdated?.[id]) {
+      const err = result.notUpdated[id];
+      throw new JMAPSetError(err.type || "unknown", err.description);
+    }
+  }
+
+  async destroyMailbox(id: string): Promise<void> {
+    const response = await this.request([
+      ["Mailbox/set", {
+        accountId: this.accountId,
+        destroy: [id],
+        onDestroyRemoveEmails: false,
+      }, "0"],
+    ]);
+
+    const result = response.methodResponses?.[0]?.[1];
+    if (result?.notDestroyed?.[id]) {
+      const err = result.notDestroyed[id];
+      throw new JMAPSetError(err.type || "unknown", err.description);
+    }
+  }
+
   async moveEmail(emailId: string, toMailboxId: string, accountId?: string): Promise<void> {
     const targetAccountId = accountId || this.accountId;
     const response = await this.request([
@@ -863,8 +920,7 @@ export class JMAPClient {
       const hasMore = computeHasMore(position, emails.length, total, limit);
 
       return { emails, hasMore, total };
-    } catch (error) {
-      console.error('Search failed:', error);
+    } catch {
       return { emails: [], hasMore: false, total: 0 };
     }
   }
@@ -875,34 +931,29 @@ export class JMAPClient {
     limit: number = 50,
     position: number = 0
   ): Promise<{ emails: Email[], hasMore: boolean, total: number }> {
-    try {
-      const targetAccountId = accountId || this.accountId;
+    const targetAccountId = accountId || this.accountId;
 
-      const response = await this.request([
-        ["Email/query", {
-          accountId: targetAccountId,
-          filter,
-          sort: [{ property: "receivedAt", isAscending: false }],
-          limit,
-          position,
-        }, "0"],
-        ["Email/get", {
-          accountId: targetAccountId,
-          "#ids": { resultOf: "0", name: "Email/query", path: "/ids" },
-          properties: [...EMAIL_LIST_PROPERTIES],
-        }, "1"],
-      ]);
+    const response = await this.request([
+      ["Email/query", {
+        accountId: targetAccountId,
+        filter,
+        sort: [{ property: "receivedAt", isAscending: false }],
+        limit,
+        position,
+      }, "0"],
+      ["Email/get", {
+        accountId: targetAccountId,
+        "#ids": { resultOf: "0", name: "Email/query", path: "/ids" },
+        properties: [...EMAIL_LIST_PROPERTIES],
+      }, "1"],
+    ]);
 
-      const queryResponse = response.methodResponses?.[0]?.[1];
-      const emails = response.methodResponses?.[1]?.[1]?.list || [];
-      const total = queryResponse?.total || 0;
-      const hasMore = computeHasMore(position, emails.length, total, limit);
+    const queryResponse = response.methodResponses?.[0]?.[1];
+    const emails = response.methodResponses?.[1]?.[1]?.list || [];
+    const total = queryResponse?.total || 0;
+    const hasMore = computeHasMore(position, emails.length, total, limit);
 
-      return { emails, hasMore, total };
-    } catch (error) {
-      console.error('Advanced search failed:', error);
-      throw error;
-    }
+    return { emails, hasMore, total };
   }
 
   async getThread(threadId: string, accountId?: string): Promise<Thread | null> {
@@ -922,8 +973,7 @@ export class JMAPClient {
       }
 
       return null;
-    } catch (error) {
-      console.error('Failed to get thread:', error);
+    } catch {
       return null;
     }
   }
@@ -957,10 +1007,13 @@ export class JMAPClient {
       }
 
       return [];
-    } catch (error) {
-      console.error('Failed to get thread emails:', error);
+    } catch {
       return [];
     }
+  }
+
+  private submissionUsing(): string[] {
+    return ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"];
   }
 
   async getIdentities(): Promise<Identity[]> {
@@ -969,15 +1022,14 @@ export class JMAPClient {
         ["Identity/get", {
           accountId: this.accountId,
         }, "0"]
-      ]);
+      ], this.submissionUsing());
 
       if (response.methodResponses?.[0]?.[0] === "Identity/get") {
         return (response.methodResponses[0][1].list || []) as Identity[];
       }
 
       return [];
-    } catch (error) {
-      console.error('Failed to get identities:', error);
+    } catch {
       return [];
     }
   }
@@ -1004,7 +1056,7 @@ export class JMAPClient {
           }
         }
       }, "0"]
-    ]);
+    ], this.submissionUsing());
 
     if (response.methodResponses?.[0]?.[0] === "Identity/set") {
       const result = response.methodResponses[0][1];
@@ -1045,7 +1097,7 @@ export class JMAPClient {
           [identityId]: updates
         }
       }, "0"]
-    ]);
+    ], this.submissionUsing());
 
     if (response.methodResponses?.[0]?.[0] === "Identity/set") {
       const result = response.methodResponses[0][1];
@@ -1072,7 +1124,7 @@ export class JMAPClient {
         accountId: this.accountId,
         destroy: [identityId]
       }, "0"]
-    ]);
+    ], this.submissionUsing());
 
     if (response.methodResponses?.[0]?.[0] === "Identity/set") {
       const result = response.methodResponses[0][1];
@@ -1225,7 +1277,6 @@ export class JMAPClient {
       if (result.notCreated || result.notUpdated) {
         const errors = result.notCreated || result.notUpdated;
         const firstError = Object.values(errors)[0] as { description?: string; type?: string };
-        console.error('Draft save error:', firstError);
         throw new Error(firstError?.description || firstError?.type || 'Failed to save draft');
       }
 
@@ -1234,7 +1285,6 @@ export class JMAPClient {
       }
     }
 
-    console.error('Unexpected draft save response:', response);
     throw new Error('Failed to save draft');
   }
 
@@ -1260,7 +1310,7 @@ export class JMAPClient {
     if (!finalIdentityId) {
       const identityResponse = await this.request([
         ["Identity/get", { accountId: this.accountId }, "0"]
-      ]);
+      ], this.submissionUsing());
 
       finalIdentityId = this.accountId;
       if (identityResponse.methodResponses?.[0]?.[0] === "Identity/get") {
@@ -1312,19 +1362,17 @@ export class JMAPClient {
       }, "1"]);
     }
 
-    const response = await this.request(methodCalls);
+    const response = await this.request(methodCalls, this.submissionUsing());
 
     if (response.methodResponses) {
       for (const [methodName, result] of response.methodResponses) {
         if (methodName.endsWith('/error')) {
-          console.error('JMAP method error:', result);
           throw new Error(result.description || `Failed to send email: ${result.type}`);
         }
 
         if (result.notCreated || result.notUpdated) {
           const errors = result.notCreated || result.notUpdated;
           const firstError = Object.values(errors)[0] as { description?: string; type?: string };
-          console.error('Email send error:', firstError);
           throw new Error(firstError?.description || firstError?.type || 'Failed to send email');
         }
       }
@@ -1394,6 +1442,16 @@ export class JMAPClient {
       .replace('{blobId}', encodeURIComponent(blobId))
       .replace('{name}', encodeURIComponent(name || 'download'))
       .replace('{type}', encodeURIComponent(type || 'application/octet-stream'));
+  }
+
+  async fetchBlobAsObjectUrl(blobId: string, name?: string, type?: string): Promise<string> {
+    const url = this.getBlobDownloadUrl(blobId, name, type);
+    const response = await this.authenticatedFetch(url, {}, { retry: false });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch blob: ${response.status}`);
+    }
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
   }
 
   getCapabilities(): Record<string, unknown> {
@@ -1699,8 +1757,7 @@ export class JMAPClient {
         return (response.methodResponses[0][1].list || []) as AddressBook[];
       }
       return [];
-    } catch (error) {
-      console.error('Failed to get address books:', error);
+    } catch {
       return [];
     }
   }
@@ -1725,8 +1782,7 @@ export class JMAPClient {
         return (response.methodResponses[1][1].list || []) as ContactCard[];
       }
       return [];
-    } catch (error) {
-      console.error('Failed to get contacts:', error);
+    } catch {
       return [];
     }
   }
@@ -1746,8 +1802,7 @@ export class JMAPClient {
         return list[0] || null;
       }
       return null;
-    } catch (error) {
-      console.error('Failed to get contact:', error);
+    } catch {
       return null;
     }
   }
@@ -1861,8 +1916,7 @@ export class JMAPClient {
         return (response.methodResponses[1][1].list || []) as ContactCard[];
       }
       return [];
-    } catch (error) {
-      console.error('Failed to search contacts:', error);
+    } catch {
       return [];
     }
   }
@@ -1878,8 +1932,7 @@ export class JMAPClient {
         return (response.methodResponses[0][1].list || []) as Calendar[];
       }
       return [];
-    } catch (error) {
-      console.error('Failed to get calendars:', error);
+    } catch {
       return [];
     }
   }
@@ -1985,8 +2038,7 @@ export class JMAPClient {
         return (response.methodResponses[1][1].list || []) as CalendarEvent[];
       }
       return [];
-    } catch (error) {
-      console.error('Failed to get calendar events:', error);
+    } catch {
       return [];
     }
   }
@@ -2021,8 +2073,7 @@ export class JMAPClient {
         return (response.methodResponses[1][1].list || []) as CalendarEvent[];
       }
       return [];
-    } catch (error) {
-      console.error('Failed to query calendar events:', error);
+    } catch {
       return [];
     }
   }
@@ -2043,8 +2094,7 @@ export class JMAPClient {
         return list[0] || null;
       }
       return null;
-    } catch (error) {
-      console.error('Failed to get calendar event:', error);
+    } catch {
       return null;
     }
   }

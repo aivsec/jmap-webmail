@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.4.0 (2026-03-23)
+
+### Features
+
+- **Folder management**: Create, rename, move, and delete mailbox folders from the sidebar
+  context menu, with drag-and-drop reparenting and inline editing (#44)
+- **Mail multi-selection**: Select multiple emails with checkboxes or shift-click, then
+  batch move or delete from the toolbar. Includes a "Move to" popover with search and
+  keyboard navigation (#43)
+
+### Fixes
+
+- **Health endpoint**: Container restarts caused by false-positive memory alerts. The check
+  was using V8's current heap allocation as the max instead of the real heap limit (#41).
+  Thanks @wrenix and @ClemaX for reporting and diagnosing.
+- **Identity deletion**: Fix "delete identity always failed" by adding the required
+  `urn:ietf:params:jmap:submission` capability to all Identity and EmailSubmission
+  operations (#42). Thanks @freddij for reporting.
+- **Inline images**: CID-referenced images now render inline instead of showing as
+  attachments
+- **Email list**: Eliminate flicker during loading and after-action refreshes
+- **Copy to clipboard**: Visual feedback on copy, fix dark mode background tint
+- **Console cleanup**: Remove production console statements
+
+### Dependencies
+
+- Next.js 16.2.0 -> 16.2.1
+- Tailwind CSS 4.2.1 -> 4.2.2
+- Zustand 5.0.11 -> 5.0.12
+- typescript-eslint 8.56.1 -> 8.57.1
+- Fix flatted prototype pollution (GHSA-rf6f-7fwh-wjgh)
+
 ## 1.3.3 (2026-03-20)
 
 ### Fixes

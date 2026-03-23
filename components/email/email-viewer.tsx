@@ -186,7 +186,6 @@ export function EmailViewer({
   className,
 }: EmailViewerProps) {
   const t = useTranslations('email_viewer');
-  const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
   const externalContentPolicy = useSettingsStore((state) => state.externalContentPolicy);
   const addTrustedSender = useSettingsStore((state) => state.addTrustedSender);
@@ -209,7 +208,7 @@ export function EmailViewer({
   // Tablet list visibility
   const { isMobile, isTablet } = useDeviceDetection();
   const { tabletListVisible } = useUIStore();
-  const { identities } = useAuthStore();
+  const { identities, client } = useAuthStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const [showFullHeaders, setShowFullHeaders] = useState(false);
   const [allowExternalContent, setAllowExternalContent] = useState(false);
@@ -228,6 +227,43 @@ export function EmailViewer({
       return saved ? new Set(JSON.parse(saved)) : new Set();
     }
   );
+
+  const [cidUrls, setCidUrls] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!email?.attachments || !client) {
+      setCidUrls(new Map());
+      return;
+    }
+    const inlineAtts = email.attachments.filter(a => a.cid && a.blobId);
+    if (inlineAtts.length === 0) {
+      setCidUrls(new Map());
+      return;
+    }
+    let cancelled = false;
+    const objectUrls: string[] = [];
+    Promise.all(
+      inlineAtts.map(async (att) => {
+        try {
+          const objectUrl = await client.fetchBlobAsObjectUrl(att.blobId, att.name, att.type);
+          objectUrls.push(objectUrl);
+          return [att.cid!, objectUrl] as const;
+        } catch {
+          return null;
+        }
+      })
+    ).then((results) => {
+      if (cancelled) return;
+      const map = new Map<string, string>();
+      for (const r of results) {
+        if (r) map.set(r[0], r[1]);
+      }
+      setCidUrls(map);
+    });
+    return () => {
+      cancelled = true;
+      objectUrls.forEach(url => URL.revokeObjectURL(url));
+    };
+  }, [email?.id, email?.attachments, client]);
 
   useEffect(() => {
     // Mark as read when email is viewed
@@ -389,16 +425,17 @@ export function EmailViewer({
     return source;
   };
 
+  const [sourceCopied, setSourceCopied] = useState(false);
   const copySourceToClipboard = async () => {
     if (!email) return;
 
     try {
       const source = generateEmailSource(email);
       await navigator.clipboard.writeText(source);
-      // Could add a toast notification here
-      console.log(tNotifications('source_copied'));
-    } catch (err) {
-      console.error('Failed to copy source:', err);
+      setSourceCopied(true);
+      setTimeout(() => setSourceCopied(false), 2000);
+    } catch {
+      return;
     }
   };
 
@@ -512,6 +549,14 @@ export function EmailViewer({
           setHasBlockedContent(true);
         }
 
+        // Replace cid: references with pre-fetched object URLs
+        if (cidUrls.size > 0) {
+          cleanHtml = cleanHtml.replace(/src="cid:([^"]+)"/gi, (match, cid) => {
+            const url = cidUrls.get(cid);
+            return url ? `src="${url}"` : match;
+          });
+        }
+
         return {
           html: cleanHtml,
           isHtml: true,
@@ -561,7 +606,7 @@ export function EmailViewer({
       html: '<p style="color: var(--color-muted-foreground);">No content available</p>',
       isHtml: false
     };
-  }, [email, allowExternalContent, hasBlockedContent, externalContentPolicy, isSenderTrusted, resolvedTheme]);
+  }, [email, allowExternalContent, hasBlockedContent, externalContentPolicy, isSenderTrusted, resolvedTheme, cidUrls]);
 
   // Detect List-Unsubscribe header for newsletter banners
   const listHeaders = useMemo(() => {
@@ -1179,7 +1224,7 @@ export function EmailViewer({
                           </div>
                         )}
 
-                        {/* AI Analysis (X-Spam-LLM) - Full width card */}
+                        {/* Spam analysis (X-Spam-LLM header) */}
                         {email.spamLLM && (
                           <div className={cn(
                             "mt-3 px-4 py-3 rounded-lg",
@@ -1212,7 +1257,7 @@ export function EmailViewer({
                                       ? "text-red-700 dark:text-red-400"
                                       : "text-amber-700 dark:text-amber-400"
                                   )}>
-                                    AI Analysis: {email.spamLLM.verdict}
+                                    Spam Analysis: {email.spamLLM.verdict}
                                   </span>
                                 </div>
                                 <p className="text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
@@ -1457,20 +1502,22 @@ export function EmailViewer({
 
         <div className="max-w-4xl mx-auto p-6">
 
-          {/* Inline Attachments */}
-          {email.attachments && email.attachments.length > 0 && (
+          {/* Attachments (excluding inline/CID images already rendered in the body) */}
+          {email.attachments && email.attachments.filter(a => !a.cid).length > 0 && (
             <div className="mb-4">
               {/* Image attachments as thumbnails */}
               {email.attachments.filter(a =>
+                !a.cid && (
                 a.type?.startsWith('image/') ||
-                ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(a.name?.split('.').pop()?.toLowerCase() || '')
+                ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(a.name?.split('.').pop()?.toLowerCase() || ''))
               ).length > 0 && (
                 <div className="mb-3">
                   <div className="flex flex-wrap gap-2">
                     {email.attachments
                       .filter(a =>
+                        !a.cid && (
                         a.type?.startsWith('image/') ||
-                        ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(a.name?.split('.').pop()?.toLowerCase() || '')
+                        ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(a.name?.split('.').pop()?.toLowerCase() || ''))
                       )
                       .map((attachment, i) => (
                         <div
@@ -1502,6 +1549,7 @@ export function EmailViewer({
 
               {/* Non-image attachments in a compact list */}
               {email.attachments.filter(a =>
+                !a.cid &&
                 !a.type?.startsWith('image/') &&
                 !['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(a.name?.split('.').pop()?.toLowerCase() || '')
               ).length > 0 && (
@@ -1509,6 +1557,7 @@ export function EmailViewer({
                   <Paperclip className="w-4 h-4 text-muted-foreground" />
                   {email.attachments
                     .filter(a =>
+                      !a.cid &&
                       !a.type?.startsWith('image/') &&
                       !['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(a.name?.split('.').pop()?.toLowerCase() || '')
                     )
@@ -1639,8 +1688,8 @@ export function EmailViewer({
                               await onQuickReply(quickReplyText);
                               setQuickReplyText("");
                               setIsQuickReplyFocused(false);
-                            } catch (error) {
-                              console.error("Failed to send quick reply:", error);
+                            } catch {
+                              return;
                             } finally {
                               setIsSendingQuickReply(false);
                             }
@@ -1706,8 +1755,8 @@ export function EmailViewer({
                   onClick={copySourceToClipboard}
                   className="flex items-center gap-1.5"
                 >
-                  <Copy className="w-4 h-4" />
-                  {t('copy_source')}
+                  {sourceCopied ? <Check className="w-4 h-4 text-green-600 dark:text-green-400" /> : <Copy className="w-4 h-4" />}
+                  {sourceCopied ? tCommon('copied') : t('copy_source')}
                 </Button>
                 <Button
                   variant="ghost"

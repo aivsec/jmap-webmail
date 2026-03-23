@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Email, Mailbox, StateChange } from "@/lib/jmap/types";
+import { Email, Mailbox, StateChange, ThreadGroup } from "@/lib/jmap/types";
 import { JMAPClient } from "@/lib/jmap/client";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useCalendarStore } from "@/stores/calendar-store";
@@ -18,6 +18,7 @@ interface EmailStore {
   quota: { used: number; total: number } | null;
   processingReadStatus: Set<string>; // Track emails being marked as read/unread
   selectedEmailIds: Set<string>; // Track selected emails for batch operations
+  lastSelectedIndex: number | null;
   hasMoreEmails: boolean; // Track if more emails are available to load
   totalEmails: number; // Total number of emails in the current mailbox/query
   isPushConnected: boolean; // Track if push notifications are connected
@@ -43,9 +44,11 @@ interface EmailStore {
   setError: (error: string | null) => void;
   setSearchQuery: (query: string) => void;
   setQuota: (quota: { used: number; total: number } | null) => void;
-  toggleEmailSelection: (emailId: string) => void;
-  selectAllEmails: () => void;
+  toggleEmailSelection: (emailId: string, groupIndex?: number) => void;
+  selectAllEmails: (threadGroups?: ThreadGroup[]) => void;
   clearSelection: () => void;
+  selectRange: (fromIndex: number, toIndex: number, threadGroups: ThreadGroup[]) => void;
+  selectByFilter: (filter: string, threadGroups: ThreadGroup[]) => void;
 
   // JMAP operations
   fetchMailboxes: (client: JMAPClient) => Promise<void>;
@@ -96,6 +99,11 @@ interface EmailStore {
   // Empty folder
   emptyFolder: (client: JMAPClient, mailboxId: string, onProgress?: (deleted: number, total: number) => void) => Promise<void>;
 
+  createMailbox: (client: JMAPClient, name: string, parentId?: string) => Promise<string | null>;
+  renameMailbox: (client: JMAPClient, mailboxId: string, newName: string) => Promise<boolean>;
+  moveMailbox: (client: JMAPClient, mailboxId: string, newParentId: string | null) => Promise<boolean>;
+  deleteMailbox: (client: JMAPClient, mailboxId: string) => Promise<boolean>;
+
   // Mock data for demo
   loadMockData: () => void;
 }
@@ -113,6 +121,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   quota: null,
   processingReadStatus: new Set(),
   selectedEmailIds: new Set(),
+  lastSelectedIndex: null,
   hasMoreEmails: false,
   totalEmails: 0,
   isPushConnected: false,
@@ -142,6 +151,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     selectedMailbox: mailboxId,
     selectedEmail: null,
     selectedEmailIds: new Set(),
+    lastSelectedIndex: null,
     expandedThreadIds: new Set(),
     threadEmailsCache: new Map(),
     isLoadingThread: null,
@@ -152,7 +162,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
   setQuota: (quota) => set({ quota }),
 
-  toggleEmailSelection: (emailId) => {
+  toggleEmailSelection: (emailId, groupIndex) => {
     const { selectedEmailIds } = get();
     const newSelection = new Set(selectedEmailIds);
     if (newSelection.has(emailId)) {
@@ -160,22 +170,73 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     } else {
       newSelection.add(emailId);
     }
-    set({ selectedEmailIds: newSelection });
+    set({
+      selectedEmailIds: newSelection,
+      lastSelectedIndex: groupIndex ?? get().lastSelectedIndex,
+    });
   },
 
-  selectAllEmails: () => {
-    const { emails } = get();
-    const allIds = new Set(emails.map(e => e.id));
-    set({ selectedEmailIds: allIds });
+  selectAllEmails: (threadGroups) => {
+    if (threadGroups) {
+      const allIds = new Set(threadGroups.map(g => g.latestEmail.id));
+      set({ selectedEmailIds: allIds, lastSelectedIndex: null });
+    } else {
+      const { emails } = get();
+      const allIds = new Set(emails.map(e => e.id));
+      set({ selectedEmailIds: allIds });
+    }
   },
 
   clearSelection: () => {
-    set({ selectedEmailIds: new Set() });
+    set({ selectedEmailIds: new Set(), lastSelectedIndex: null });
+  },
+
+  selectRange: (fromIndex, toIndex, threadGroups) => {
+    const start = Math.min(fromIndex, toIndex);
+    const end = Math.max(fromIndex, toIndex);
+    const { selectedEmailIds } = get();
+    const newSelection = new Set(selectedEmailIds);
+    for (let i = start; i <= end; i++) {
+      const group = threadGroups[i];
+      if (group) {
+        newSelection.add(group.latestEmail.id);
+      }
+    }
+    set({ selectedEmailIds: newSelection, lastSelectedIndex: toIndex });
+  },
+
+  selectByFilter: (filter, threadGroups) => {
+    if (filter === 'none') {
+      set({ selectedEmailIds: new Set(), lastSelectedIndex: null });
+      return;
+    }
+    if (filter === 'all') {
+      const allIds = new Set(threadGroups.map(g => g.latestEmail.id));
+      set({ selectedEmailIds: allIds, lastSelectedIndex: null });
+      return;
+    }
+    const newSelection = new Set<string>();
+    for (const group of threadGroups) {
+      const email = group.latestEmail;
+      const seen = !!email.keywords?.$seen;
+      const flagged = !!email.keywords?.$flagged;
+      const match =
+        (filter === 'read' && seen) ||
+        (filter === 'unread' && !seen) ||
+        (filter === 'starred' && flagged) ||
+        (filter === 'unstarred' && !flagged);
+      if (match) {
+        newSelection.add(email.id);
+      }
+    }
+    set({ selectedEmailIds: newSelection, lastSelectedIndex: null });
   },
 
   // JMAP operations
   fetchMailboxes: async (client) => {
-    set({ isLoading: true, error: null });
+    if (get().mailboxes.length === 0) {
+      set({ isLoading: true, error: null });
+    }
     try {
       const mailboxes = await client.getAllMailboxes();
 
@@ -224,7 +285,6 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         isLoading: false
       });
     } catch (error) {
-      console.error('Failed to fetch emails:', error);
       set({
         error: error instanceof Error ? error.message : "Failed to fetch emails",
         isLoading: false,
@@ -283,7 +343,6 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         isLoadingMore: false
       });
     } catch (error) {
-      console.error('Failed to load more emails:', error);
       set({
         error: error instanceof Error ? error.message : "Failed to load more emails",
         isLoadingMore: false
@@ -325,15 +384,12 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
   },
 
   sendEmail: async (client, to, subject, body, cc, bcc, identityId, fromEmail, draftId, fromName) => {
-    set({ isLoading: true, error: null });
+    set({ error: null });
     try {
       await client.sendEmail(to, subject, body, cc, bcc, identityId, fromEmail, draftId, fromName);
-      // Refresh handled by UI layer for immediate feedback
-      set({ isLoading: false });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : "Failed to send email",
-        isLoading: false
       });
       throw error;
     }
@@ -727,7 +783,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     const { selectedEmailIds, emails, mailboxes } = get();
     if (selectedEmailIds.size === 0) return;
 
-    set({ isLoading: true, error: null });
+    set({ error: null });
     try {
       const emailIdsArray = Array.from(selectedEmailIds);
       await client.batchMarkAsRead(emailIdsArray, read);
@@ -763,12 +819,10 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         emails: updatedEmails,
         mailboxes: updatedMailboxes,
         selectedEmailIds: new Set(),
-        isLoading: false
       });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : "Failed to update emails",
-        isLoading: false
       });
     }
   },
@@ -777,7 +831,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     const { selectedEmailIds, emails, mailboxes } = get();
     if (selectedEmailIds.size === 0) return;
 
-    set({ isLoading: true, error: null });
+    set({ error: null });
     try {
       const emailIdsArray = Array.from(selectedEmailIds);
       await client.batchDeleteEmails(emailIdsArray);
@@ -814,12 +868,10 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         mailboxes: updatedMailboxes,
         selectedEmailIds: new Set(),
         selectedEmail: null,
-        isLoading: false
       });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : "Failed to delete emails",
-        isLoading: false
       });
     }
   },
@@ -828,7 +880,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     const { selectedEmailIds, emails } = get();
     if (selectedEmailIds.size === 0) return;
 
-    set({ isLoading: true, error: null });
+    set({ error: null });
     try {
       const emailIdsArray = Array.from(selectedEmailIds);
       await client.batchMoveEmails(emailIdsArray, toMailboxId);
@@ -839,15 +891,13 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       set({
         emails: remainingEmails,
         selectedEmailIds: new Set(),
-        isLoading: false
       });
 
-      // Refresh emails to get updated list
-      await get().fetchEmails(client, get().selectedMailbox);
+      // Silent refresh to sync with server
+      await get().refreshCurrentMailbox(client);
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : "Failed to move emails",
-        isLoading: false
       });
     }
   },
@@ -867,21 +917,16 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       accountId: currentMailbox.accountId,
     });
 
-    try {
-      await client.markAsSpam(emailId, currentMailbox.accountId);
+    await client.markAsSpam(emailId, currentMailbox.accountId);
 
-      set(state => ({
-        emails: state.emails.filter(e => e.id !== emailId),
-        selectedEmail: state.selectedEmail?.id === emailId ? null : state.selectedEmail,
-      }));
+    set(state => ({
+      emails: state.emails.filter(e => e.id !== emailId),
+      selectedEmail: state.selectedEmail?.id === emailId ? null : state.selectedEmail,
+    }));
 
-      const currentIndex = emails.findIndex(e => e.id === emailId);
-      if (currentIndex >= 0 && currentIndex < emails.length - 1) {
-        set({ selectedEmail: emails[currentIndex + 1] });
-      }
-    } catch (error) {
-      console.error('Failed to mark as spam:', error);
-      throw error;
+    const currentIndex = emails.findIndex(e => e.id === emailId);
+    if (currentIndex >= 0 && currentIndex < emails.length - 1) {
+      set({ selectedEmail: emails[currentIndex + 1] });
     }
   },
 
@@ -917,13 +962,8 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       targetMailboxId = inboxMailbox.originalId || inboxMailbox.id;
     }
 
-    try {
-      await client.undoSpam(emailId, targetMailboxId, accountId);
-      await get().fetchEmails(client, selectedMailbox);
-    } catch (error) {
-      console.error('Failed to restore email:', error);
-      throw error;
-    }
+    await client.undoSpam(emailId, targetMailboxId, accountId);
+    await get().fetchEmails(client, selectedMailbox);
   },
 
   batchMarkAsSpam: async (client, emailIds) => {
@@ -932,20 +972,15 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     const currentMailbox = mailboxes.find(m => m.id === selectedMailbox);
     if (!currentMailbox) return;
 
-    try {
-      for (const emailId of emailIds) {
-        await client.markAsSpam(emailId, currentMailbox.accountId);
-      }
-
-      set(state => ({
-        emails: state.emails.filter(e => !emailIds.includes(e.id)),
-        selectedEmail: emailIds.includes(state.selectedEmail?.id || '') ? null : state.selectedEmail,
-        selectedEmailIds: new Set(),
-      }));
-    } catch (error) {
-      console.error('Failed to batch mark as spam:', error);
-      throw error;
+    for (const emailId of emailIds) {
+      await client.markAsSpam(emailId, currentMailbox.accountId);
     }
+
+    set(state => ({
+      emails: state.emails.filter(e => !emailIds.includes(e.id)),
+      selectedEmail: emailIds.includes(state.selectedEmail?.id || '') ? null : state.selectedEmail,
+      selectedEmailIds: new Set(),
+    }));
   },
 
   batchUndoSpam: async (client: JMAPClient, emailIds: string[]) => {
@@ -964,20 +999,15 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       throw new Error('Inbox not found');
     }
 
-    try {
-      for (const emailId of emailIds) {
-        await client.undoSpam(emailId, inboxMailbox.originalId || inboxMailbox.id, accountId);
-      }
-
-      set(state => ({
-        emails: state.emails.filter(e => !emailIds.includes(e.id)),
-        selectedEmail: emailIds.includes(state.selectedEmail?.id || '') ? null : state.selectedEmail,
-        selectedEmailIds: new Set(),
-      }));
-    } catch (error) {
-      console.error('Failed to batch restore emails:', error);
-      throw error;
+    for (const emailId of emailIds) {
+      await client.undoSpam(emailId, inboxMailbox.originalId || inboxMailbox.id, accountId);
     }
+
+    set(state => ({
+      emails: state.emails.filter(e => !emailIds.includes(e.id)),
+      selectedEmail: emailIds.includes(state.selectedEmail?.id || '') ? null : state.selectedEmail,
+      selectedEmailIds: new Set(),
+    }));
   },
 
   // Push notification handlers
@@ -1025,13 +1055,10 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
         const { useFilterStore } = await import('./filter-store');
         const filterStore = useFilterStore.getState();
         if (filterStore.isSupported) {
-          filterStore.fetchFilters(client).catch((err) => {
-            console.error('Failed to refresh filters:', err);
-          });
+          filterStore.fetchFilters(client).catch(() => {});
         }
       }
     } catch (error) {
-      console.error('Failed to handle state change:', error);
       set({
         error: error instanceof Error ? error.message : "Failed to handle push notification"
       });
@@ -1088,10 +1115,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
           totalEmails: result.total,
         });
       }
-    } catch (error) {
-      console.error('Failed to refresh current mailbox:', error);
-      // Don't set error state for background refreshes to avoid disrupting the UI
-    }
+    } catch { /* silent: push refresh is best-effort */ }
   },
 
   handleNewEmailNotification: (email) => {
@@ -1148,8 +1172,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       });
 
       return emails;
-    } catch (error) {
-      console.error('Failed to fetch thread emails:', error);
+    } catch {
       set({ isLoadingThread: null });
       return [];
     }
@@ -1173,9 +1196,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       const tags = ["red", "orange", "yellow", "green", "blue", "purple", "pink"];
       const tagCounts = await client.queryTagCounts(tags);
       set({ tagCounts });
-    } catch (error) {
-      console.error("Failed to fetch tag counts:", error);
-    }
+    } catch { /* silent: tag counts are non-critical */ }
   },
 
   emptyFolder: async (client, mailboxId, onProgress) => {
@@ -1212,6 +1233,159 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     await get().fetchMailboxes(client);
     if (get().selectedMailbox === mailboxId) {
       set({ emails: [], totalEmails: 0, hasMoreEmails: false });
+    }
+  },
+
+  createMailbox: async (client, name, parentId) => {
+    const tempId = `temp-${Date.now()}`;
+    const mailboxes = get().mailboxes;
+
+    const tempMailbox: Mailbox = {
+      id: tempId,
+      name,
+      parentId: parentId || undefined,
+      sortOrder: 999,
+      totalEmails: 0,
+      unreadEmails: 0,
+      totalThreads: 0,
+      unreadThreads: 0,
+      myRights: {
+        mayReadItems: true, mayAddItems: true, mayRemoveItems: true,
+        maySetSeen: true, maySetKeywords: true, mayCreateChild: true,
+        mayRename: true, mayDelete: true, maySubmit: false,
+      },
+      isSubscribed: true,
+    };
+
+    set({ mailboxes: [...mailboxes, tempMailbox] });
+
+    try {
+      const realId = await client.createMailbox(name, parentId);
+
+      set((state) => {
+        const updated = state.mailboxes.map(mb =>
+          mb.id === tempId ? { ...mb, id: realId } : mb
+        );
+        const newState: Partial<EmailStore> = { mailboxes: updated };
+        if (state.selectedMailbox === tempId) {
+          newState.selectedMailbox = realId;
+        }
+        return newState;
+      });
+
+      return realId;
+    } catch (error) {
+      set({ mailboxes: get().mailboxes.filter(mb => mb.id !== tempId) });
+      throw error;
+    }
+  },
+
+  renameMailbox: async (client, mailboxId, newName) => {
+    const mailboxes = get().mailboxes;
+    const mailbox = mailboxes.find(mb => mb.id === mailboxId);
+    if (!mailbox) return false;
+
+    const previousName = mailbox.name;
+    const jmapId = mailbox.originalId || mailboxId;
+
+    set({
+      mailboxes: mailboxes.map(mb =>
+        mb.id === mailboxId ? { ...mb, name: newName } : mb
+      ),
+    });
+
+    try {
+      await client.updateMailbox(jmapId, { name: newName });
+      return true;
+    } catch (error) {
+      set({
+        mailboxes: get().mailboxes.map(mb =>
+          mb.id === mailboxId ? { ...mb, name: previousName } : mb
+        ),
+      });
+      throw error;
+    }
+  },
+
+  moveMailbox: async (client, mailboxId, newParentId) => {
+    const mailboxes = get().mailboxes;
+    const mailbox = mailboxes.find(mb => mb.id === mailboxId);
+    if (!mailbox) return false;
+
+    const previousParentId = mailbox.parentId;
+    const jmapId = mailbox.originalId || mailboxId;
+
+    set({
+      mailboxes: mailboxes.map(mb =>
+        mb.id === mailboxId ? { ...mb, parentId: newParentId || undefined } : mb
+      ),
+    });
+
+    try {
+      await client.updateMailbox(jmapId, { parentId: newParentId });
+      return true;
+    } catch (error) {
+      set({
+        mailboxes: get().mailboxes.map(mb =>
+          mb.id === mailboxId ? { ...mb, parentId: previousParentId } : mb
+        ),
+      });
+      throw error;
+    }
+  },
+
+  deleteMailbox: async (client, mailboxId) => {
+    const mailboxes = get().mailboxes;
+    const mailbox = mailboxes.find(mb => mb.id === mailboxId);
+    if (!mailbox) return false;
+
+    if (get().selectedMailbox === mailboxId) {
+      const inbox = mailboxes.find(mb => mb.role === 'inbox');
+      if (inbox) set({ selectedMailbox: inbox.id });
+    }
+
+    const collectDescendants = (parentId: string): Mailbox[] => {
+      const children = mailboxes.filter(mb => mb.parentId === parentId);
+      const descendants: Mailbox[] = [];
+      for (const child of children) {
+        descendants.push(...collectDescendants(child.id));
+        descendants.push(child);
+      }
+      return descendants;
+    };
+
+    const descendants = collectDescendants(mailboxId);
+    const allToDelete = [...descendants, mailbox];
+    const allIds = new Set(allToDelete.map(mb => mb.id));
+
+    const trashMailbox = mailboxes.find(mb => mb.role === 'trash');
+    const trashId = trashMailbox?.originalId || trashMailbox?.id;
+
+    set({ mailboxes: mailboxes.filter(mb => !allIds.has(mb.id)) });
+
+    try {
+      for (const mb of allToDelete) {
+        const jmapId = mb.originalId || mb.id;
+
+        if (trashId && mb.totalEmails > 0) {
+          let position = 0;
+          while (true) {
+            const batch = await client.queryMailboxEmailIds(jmapId, 500, position);
+            if (batch.ids.length === 0) break;
+            await client.batchMoveEmails(batch.ids, trashId);
+            if (batch.ids.length < 500) break;
+            position = 0;
+          }
+        }
+
+        await client.destroyMailbox(jmapId);
+      }
+
+      await get().fetchMailboxes(client);
+      return true;
+    } catch (error) {
+      await get().fetchMailboxes(client);
+      throw error;
     }
   },
 
